@@ -142,6 +142,7 @@ internal static class Program
                 ["itemName"] = name,
                 ["nomenclatureView"] = kindName,
                 ["nomenclatureViewSourceRef"] = GetString(item, "nomenclatureViewSourceRef") ?? "",
+                ["nomenclatureType"] = GetString(item, "nomenclatureType") ?? "",
                 ["storageUnit"] = unit,
                 ["usesCharacteristics"] = usesCharacteristics
             };
