@@ -1,0 +1,22 @@
+name: Build test transfer worker
+
+on:
+  push:
+    branches:
+      - feature/test-pdm-erp-transfer
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - name: Restore
+        run: dotnet restore src/RabbitMqPdmErpWorker/RabbitMqPdmErpWorker.csproj
+      - name: Build
+        run: dotnet build src/RabbitMqPdmErpWorker/RabbitMqPdmErpWorker.csproj --configuration Release --no-restore
