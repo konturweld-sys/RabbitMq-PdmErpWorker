@@ -36,7 +36,7 @@ Outbox Publisher использует persistent delivery и RabbitMQ Publisher 
 - `EntityTypeOwner` связывает каждый EntityType с одной системой-владельцем (PK по EntityTypeKey). Экземпляр может выполнить RegisterEntity только для типов своей системы.
 - При запуске Worker проверяет соответствие `Ekk:SourceSystemInstanceKey`, `Ekk:SystemCode` и `Ekk:InstanceCode` активным записям `SourceSystem` и `SourceSystemInstance`.
 - `RegisterSourceObject` по-прежнему разрешён только экземпляру, который создал Entity.
-- Скрипт `sql/EntityTypeOwnership_And_TestInstances.sql` создаёт `EntityTypeOwner` и идемпотентно добавляет системы PDM/ERP/MES и тестовые экземпляры PDM_TEST/ERP_TEST. Он не заполняет EntityType и назначения владельцев: для этого необходим утверждённый перечень кодов EntityType.
+- Скрипт `sql/EntityTypeOwnership_And_TestInstances.sql` создаёт `EntityTypeOwner` и идемпотентно добавляет системы PDM/ERP/MES и создаёт тестовые экземпляры только после задания согласованных кодов в переменных `@PdmTestInstanceCode` и `@ErpTestInstanceCode`. Он не заполняет EntityType и назначения владельцев: для этого необходим утверждённый перечень кодов EntityType.
 - Перед запуском требуется проверить ограничения БД и RabbitMQ topology.
 - Outbox Publisher рассчитан на один экземпляр на одну БД; для нескольких экземпляров нужен согласованный механизм захвата строк Outbox.
 
