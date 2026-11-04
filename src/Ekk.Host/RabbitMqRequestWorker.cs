@@ -1,4 +1,6 @@
+using System.Data;
 using System.Text;
+using Microsoft.Data.SqlClient;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -19,6 +21,7 @@ public sealed class RabbitMqRequestWorker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         ValidateConfiguration();
+        await ValidateSourceSystemInstanceAsync(stoppingToken);
         var factory = new ConnectionFactory { HostName = _rabbit.HostName, Port = _rabbit.Port, VirtualHost = _rabbit.VirtualHost,
             UserName = _rabbit.UserName, Password = _rabbit.Password, AutomaticRecoveryEnabled = true, TopologyRecoveryEnabled = true,
             ClientProvidedName = $"EKK-Requests/{_ekk.SystemCode}/{_ekk.InstanceCode}" };
