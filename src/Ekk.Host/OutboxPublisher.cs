@@ -57,9 +57,13 @@ public sealed class OutboxPublisher : BackgroundService
     private async Task<List<OutboxRecord>> ReadPendingAsync(CancellationToken ct)
     {
         var rows = new List<OutboxRecord>();
-        const string sql = "SELECT TOP (@BatchSize) OutboxMessageKey,MessageId,EventType,EntityId,EntitySequence,RoutingKey,Payload,AttemptCount FROM ekk.OutboxMessage WITH (READPAST) WHERE Status='Pending' AND (NextAttemptAt IS NULL OR NextAttemptAt<=SYSUTCDATETIME())
-AND NOT EXISTS (SELECT 1 FROM ekk.OutboxMessage earlier WHERE earlier.EntityId=ekk.OutboxMessage.EntityId
-AND earlier.EntitySequence<ekk.OutboxMessage.EntitySequence AND earlier.Status='Pending')
+        const string sql = @"SELECT TOP (@BatchSize) OutboxMessageKey,MessageId,EventType,EntityId,EntitySequence,RoutingKey,Payload,AttemptCount
+FROM ekk.OutboxMessage WITH (READPAST)
+WHERE Status='Pending' AND (NextAttemptAt IS NULL OR NextAttemptAt<=SYSUTCDATETIME())
+AND NOT EXISTS (SELECT 1 FROM ekk.OutboxMessage earlier
+    WHERE earlier.EntityId=ekk.OutboxMessage.EntityId
+      AND earlier.EntitySequence<ekk.OutboxMessage.EntitySequence
+      AND earlier.Status='Pending')
 ORDER BY CreatedAt,OutboxMessageKey;";
         await using var c = new SqlConnection(_sql.ConnectionString); await c.OpenAsync(ct);
         await using var cmd = new SqlCommand(sql, c) { CommandTimeout = _sql.CommandTimeoutSeconds };
