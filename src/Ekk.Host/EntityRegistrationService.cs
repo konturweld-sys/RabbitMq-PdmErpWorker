@@ -27,10 +27,10 @@ public sealed class EntityRegistrationService
                 if (string.IsNullOrWhiteSpace(request.EntityTypeCode) || request.EntityTypeCode.Length > 128)
                     return Failure("INVALID_PAYLOAD", "EntityTypeCode обязателен (не более 128 символов).");
                 const string typeSql = """
-                    SELECT et.EntityTypeKey, owner.SourceSystemKey, instance.SourceSystemKey
+                    SELECT et.EntityTypeKey, eto.SourceSystemKey, instance.SourceSystemKey
                     FROM ekk.EntityType AS et WITH (UPDLOCK,HOLDLOCK)
-                    LEFT JOIN ekk.EntityTypeOwner AS owner WITH (UPDLOCK,HOLDLOCK)
-                        ON owner.EntityTypeKey = et.EntityTypeKey
+                    LEFT JOIN ekk.EntityTypeOwner AS eto WITH (UPDLOCK,HOLDLOCK)
+                        ON eto.EntityTypeKey = et.EntityTypeKey
                     INNER JOIN ekk.SourceSystemInstance AS instance
                         ON instance.SourceSystemInstanceKey = @InstanceKey
                        AND instance.IsActive = 1
