@@ -34,9 +34,6 @@ public sealed class EntityRegistrationService
                     INNER JOIN ekk.SourceSystemInstance AS instance
                         ON instance.SourceSystemInstanceKey = @InstanceKey
                        AND instance.IsActive = 1
-                    INNER JOIN ekk.SourceSystem AS ownerSystem
-                        ON ownerSystem.SourceSystemKey = owner.SourceSystemKey
-                       AND ownerSystem.IsActive = 1
                     WHERE et.Code = @Code AND et.IsActive = 1;
                     """;
                 await using var typeCmd = new SqlCommand(typeSql, c, t) { CommandTimeout = _sql.CommandTimeoutSeconds };
