@@ -99,9 +99,27 @@ public sealed class RabbitMqRequestWorker : BackgroundService
         var props = channel.CreateBasicProperties(); props.Persistent = true; props.ContentType = "application/json";
         props.ContentEncoding = "utf-8"; props.CorrelationId = delivery.BasicProperties.CorrelationId;
         props.MessageId = Guid.CreateVersion7().ToString("D");
-        var route = $"response.{_ekk.SystemCode}.{_ekk.InstanceCode}.{delivery.BasicProperties.Type ?? "Request"}";
-        channel.BasicPublish(_rabbit.ResponseExchange, route, true, props, Encoding.UTF8.GetBytes(JsonSerializer.Serialize(response)));
-        channel.WaitForConfirmsOrDie(TimeSpan.FromSeconds(10));
+        var requestType = "Request";
+        try
+        {
+            using var requestDocument = JsonDocument.Parse(delivery.Body.ToArray());
+            if (requestDocument.RootElement.TryGetProperty("MessageType", out var type) &&
+                type.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(type.GetString()))
+                requestType = type.GetString()!;
+        }
+        catch (JsonException) { }
+        var route = $"response.{_ekk.SystemCode}.{_ekk.InstanceCode}.{requestType}";
+        string? returnedId = null;
+        EventHandler<BasicReturnEventArgs> onReturn = (_, e) => returnedId = e.BasicProperties?.MessageId;
+        channel.BasicReturn += onReturn;
+        try
+        {
+            channel.BasicPublish(_rabbit.ResponseExchange, route, true, props, Encoding.UTF8.GetBytes(JsonSerializer.Serialize(response)));
+            channel.WaitForConfirmsOrDie(TimeSpan.FromSeconds(10));
+            if (returnedId is not null)
+                throw new InvalidOperationException($"RabbitMQ returned unroutable RPC response {returnedId}.");
+        }
+        finally { channel.BasicReturn -= onReturn; }
     }
     private static string? OptionalString(JsonElement p, string n) => p.TryGetProperty(n, out var v) && v.ValueKind != JsonValueKind.Null ? v.GetString() : null;
     private static OperationResponse Convert(RegistrationResult r) => new(r.Success, r.ResponseCode,
