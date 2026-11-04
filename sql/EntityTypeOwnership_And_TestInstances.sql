@@ -78,6 +78,51 @@ BEGIN TRY
     FROM ekk.SourceSystem AS s
     WHERE s.Code = N'ERP';
 
+    /*
+        Owner assignments are intentionally data-driven. Once the approved EntityType.Code
+        catalogue is available, add rows to @EntityTypeOwnerSeed below.
+        Example syntax only (do not use placeholder codes):
+        INSERT @EntityTypeOwnerSeed (EntityTypeCode, SourceSystemCode)
+        VALUES (N'<approved EntityType.Code>', N'PDM');
+    */
+    DECLARE @EntityTypeOwnerSeed TABLE
+    (
+        EntityTypeCode nvarchar(128) NOT NULL PRIMARY KEY,
+        SourceSystemCode nvarchar(128) NOT NULL
+    );
+
+    IF EXISTS
+    (
+        SELECT 1
+        FROM @EntityTypeOwnerSeed AS seed
+        LEFT JOIN ekk.EntityType AS et ON et.Code = seed.EntityTypeCode
+        LEFT JOIN ekk.SourceSystem AS ss ON ss.Code = seed.SourceSystemCode
+        WHERE et.EntityTypeKey IS NULL OR ss.SourceSystemKey IS NULL
+    )
+        THROW 51002, 'EntityType owner seed contains an unknown EntityType.Code or SourceSystem.Code.', 1;
+
+    INSERT ekk.EntityTypeOwner (EntityTypeKey, SourceSystemKey)
+    SELECT et.EntityTypeKey, ss.SourceSystemKey
+    FROM @EntityTypeOwnerSeed AS seed
+    INNER JOIN ekk.EntityType AS et ON et.Code = seed.EntityTypeCode
+    INNER JOIN ekk.SourceSystem AS ss ON ss.Code = seed.SourceSystemCode
+    WHERE NOT EXISTS
+    (
+        SELECT 1 FROM ekk.EntityTypeOwner AS existing
+        WHERE existing.EntityTypeKey = et.EntityTypeKey
+    );
+
+    IF EXISTS
+    (
+        SELECT 1
+        FROM @EntityTypeOwnerSeed AS seed
+        INNER JOIN ekk.EntityType AS et ON et.Code = seed.EntityTypeCode
+        INNER JOIN ekk.SourceSystem AS ss ON ss.Code = seed.SourceSystemCode
+        INNER JOIN ekk.EntityTypeOwner AS existing ON existing.EntityTypeKey = et.EntityTypeKey
+        WHERE existing.SourceSystemKey <> ss.SourceSystemKey
+    )
+        THROW 51003, 'An EntityType already has a different owner. Ownership changes require an explicit reviewed migration.', 1;
+
     IF EXISTS
     (
         SELECT 1
@@ -86,7 +131,7 @@ BEGIN TRY
         WHERE (s.Code = N'PDM' AND @PdmTestInstanceCode IS NOT NULL AND i.Code = @PdmTestInstanceCode AND i.IsActive = 0)
            OR (s.Code = N'ERP' AND @ErpTestInstanceCode IS NOT NULL AND i.Code = @ErpTestInstanceCode AND i.IsActive = 0)
     )
-        THROW 51001, 'PDM_TEST or ERP_TEST exists but is inactive. Resolve it explicitly; this script does not reactivate records.', 1;
+        THROW 51001, 'A configured test instance exists but is inactive. Resolve it explicitly; this script does not reactivate records.', 1;
 
     COMMIT TRANSACTION;
 
