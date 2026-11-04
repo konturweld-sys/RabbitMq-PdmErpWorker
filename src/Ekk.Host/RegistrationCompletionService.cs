@@ -99,6 +99,11 @@ public sealed class RegistrationCompletionService
                 OperationCode, request.EntityId);
             throw;
         }
+        catch (OperationCanceledException)
+        {
+            await SafeRollbackAsync(transaction);
+            throw;
+        }
         catch (Exception ex)
         {
             await SafeRollbackAsync(transaction);
