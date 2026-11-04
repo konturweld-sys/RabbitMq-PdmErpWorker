@@ -8,11 +8,16 @@
       (including the 39 documentation categories) is not present in the repository/database.
     - Consequently, EntityTypeOwner remains empty until the approved type codes are loaded and
       mapped. RegisterEntity will fail closed with ENTITY_TYPE_OWNER_NOT_CONFIGURED.
-    - Test instance codes below are explicit deployment defaults; change them here only if the
-      actual PDM/ERP test instance identifiers have been agreed differently.
+    - Test instance codes are intentionally NULL until the actual PDM/ERP test instance
+      identifiers are confirmed. Set the two variables below before creating instances.
+    - RЦ ownership is intentionally not seeded: the prior decision left MES vs ERP (ТОиР)
+      unresolved; do not infer an owner.
 */
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
+
+DECLARE @PdmTestInstanceCode nvarchar(128) = NULL; -- set to the agreed PDM test instance code
+DECLARE @ErpTestInstanceCode nvarchar(128) = NULL; -- set to the agreed ERP test instance code
 
 BEGIN TRY
     BEGIN TRANSACTION;
@@ -45,30 +50,30 @@ BEGIN TRY
         INSERT ekk.SourceSystem (SourceSystemId, Code, Name, Description, IsActive, CreatedAt, UpdatedAt)
         VALUES (NEWID(), N'MES', N'Manufacturing Execution System', N'Владелец производственных типов Entity, закреплённых за MES.', 1, SYSUTCDATETIME(), SYSUTCDATETIME());
 
-    IF NOT EXISTS
+    IF NULLIF(LTRIM(RTRIM(@PdmTestInstanceCode)), N'') IS NOT NULL AND NOT EXISTS
     (
         SELECT 1
         FROM ekk.SourceSystemInstance AS i
         INNER JOIN ekk.SourceSystem AS s ON s.SourceSystemKey = i.SourceSystemKey
-        WHERE s.Code = N'PDM' AND i.Code = N'PDM_TEST'
+        WHERE s.Code = N'PDM' AND i.Code = @PdmTestInstanceCode
     )
     INSERT ekk.SourceSystemInstance
         (SourceSystemInstanceId, SourceSystemKey, Code, Name, Description, EnvironmentCode, IsActive, CreatedAt, UpdatedAt)
-    SELECT NEWID(), s.SourceSystemKey, N'PDM_TEST', N'PDM test instance',
+    SELECT NEWID(), s.SourceSystemKey, @PdmTestInstanceCode, N'PDM test instance',
         N'Тестовый экземпляр PDM для интеграционного тестирования ЕКК.', N'Test', 1, SYSUTCDATETIME(), SYSUTCDATETIME()
     FROM ekk.SourceSystem AS s
     WHERE s.Code = N'PDM';
 
-    IF NOT EXISTS
+    IF NULLIF(LTRIM(RTRIM(@ErpTestInstanceCode)), N'') IS NOT NULL AND NOT EXISTS
     (
         SELECT 1
         FROM ekk.SourceSystemInstance AS i
         INNER JOIN ekk.SourceSystem AS s ON s.SourceSystemKey = i.SourceSystemKey
-        WHERE s.Code = N'ERP' AND i.Code = N'ERP_TEST'
+        WHERE s.Code = N'ERP' AND i.Code = @ErpTestInstanceCode
     )
     INSERT ekk.SourceSystemInstance
         (SourceSystemInstanceId, SourceSystemKey, Code, Name, Description, EnvironmentCode, IsActive, CreatedAt, UpdatedAt)
-    SELECT NEWID(), s.SourceSystemKey, N'ERP_TEST', N'ERP test instance',
+    SELECT NEWID(), s.SourceSystemKey, @ErpTestInstanceCode, N'ERP test instance',
         N'Тестовый экземпляр ERP для интеграционного тестирования ЕКК.', N'Test', 1, SYSUTCDATETIME(), SYSUTCDATETIME()
     FROM ekk.SourceSystem AS s
     WHERE s.Code = N'ERP';
@@ -78,8 +83,8 @@ BEGIN TRY
         SELECT 1
         FROM ekk.SourceSystemInstance AS i
         INNER JOIN ekk.SourceSystem AS s ON s.SourceSystemKey = i.SourceSystemKey
-        WHERE (s.Code = N'PDM' AND i.Code = N'PDM_TEST' AND i.IsActive = 0)
-           OR (s.Code = N'ERP' AND i.Code = N'ERP_TEST' AND i.IsActive = 0)
+        WHERE (s.Code = N'PDM' AND @PdmTestInstanceCode IS NOT NULL AND i.Code = @PdmTestInstanceCode AND i.IsActive = 0)
+           OR (s.Code = N'ERP' AND @ErpTestInstanceCode IS NOT NULL AND i.Code = @ErpTestInstanceCode AND i.IsActive = 0)
     )
         THROW 51001, 'PDM_TEST or ERP_TEST exists but is inactive. Resolve it explicitly; this script does not reactivate records.', 1;
 
