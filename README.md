@@ -1,88 +1,58 @@
 # ЕКК — единое корпоративное ядро
 
-Новая реализация ЕКК на .NET 10 LTS.
+Worker ЕКК на .NET 10: RPC через RabbitMQ, транзакционная регистрация в SQL Server и публикация событий через transactional Outbox.
 
-## Текущий объём
+## Операции
 
-Первая реализация — обработка операции `CompleteEntityRegistration`:
+- **RegisterEntity** — создаёт Entity с UUIDv7; EntityTypeCode разрешается только по активной записи ekk.EntityType. Начальный статус — RegistrationPending.
+- **RegisterSourceObject** — связывает локальный объект с Entity по уникальной идентичности (SourceSystemInstanceKey, ExternalObjectType, ExternalObjectId).
+- **CompleteEntityRegistration** — переводит Entity из RegistrationPending в Registered или RegistrationError и одновременно записывает историю.
 
-- только система-владелец может завершить регистрацию Entity;
-- допустимые переходы: `RegistrationPending → Registered` и `RegistrationPending → RegistrationError`;
-- текущий статус, история регистрации и результат идемпотентности фиксируются одной SQL-транзакцией;
-- повтор с тем же ключом и тем же содержимым возвращает сохранённый ответ;
-- повторное использование ключа с другим содержимым возвращает `IDEMPOTENCY_KEY_REUSE`;
-- повторное завершение тем же результатом не создаёт дополнительную запись истории;
-- EntityId не удаляется и не переиспользуется.
+Все операции используют RequestIdempotency. Повтор с тем же ключом и тем же содержимым возвращает сохранённый ответ; повторное использование ключа с другим содержимым отклоняется.
 
-## Структура
+## Транзакции и доставка
 
-```
-EKK.sln
-src/
-  Ekk.Host/
-    Program.cs
-    RabbitMqRequestWorker.cs
-    RegistrationCompletionService.cs
-    Ekk.Host.csproj
-    appsettings.json
-```
+При регистрации Entity или SourceObject в одной SQL-транзакции выполняется бизнес-изменение, увеличивается Entity.LastEventSequence, создаётся ekk.OutboxMessage, сохраняется ответ идемпотентности и выполняется COMMIT.
 
-## Требования
+Outbox Publisher использует persistent delivery и RabbitMQ Publisher Confirms. Статус Published устанавливается только после подтверждения брокера. При ошибке увеличивается AttemptCount, задаётся NextAttemptAt с ограниченной экспоненциальной задержкой и сохраняется LastError. Сбой после подтверждения RabbitMQ, но до обновления SQL может вызвать повторную публикацию; потребитель должен дедуплицировать по MessageId (at-least-once).
 
-- .NET 10 SDK
-- SQL Server с уже развёрнутой согласованной схемой ЕКК
-- RabbitMQ с очередью `ekk.requests` и exchange `ekk.responses`
+Входящий запрос ACK-ается только после обработки и подтверждённой публикации ответа. Ошибка SQL или RabbitMQ приводит к NACK/requeue. Обработка последовательная, без конкурентного доступа к RabbitMQ IModel.
 
-## Настройка
+## RabbitMQ
 
-Не храните пароли в репозитории. Перед запуском задайте переменные окружения:
+- Request queue: ekk.requests.
+- RPC response exchange: ekk.responses.
+- Outbox event exchange: ekk.events.
+- RPC routing key: response.{SystemCode}.{InstanceCode}.{MessageType}.
+- Event routing keys: entity.created и entity.source-object-registered.
+- Конверт RPC: MessageId, CorrelationId, MessageType, SchemaVersion=1, CreatedAt, Payload.
 
-- `Sql__ConnectionString`
-- `RabbitMq__UserName`
-- `RabbitMq__Password`
-- `Ekk__SourceSystemInstanceKey`
-- `Ekk__SystemCode`
-- `Ekk__InstanceCode`
+Очередь и exchange должны быть заранее созданы; Worker не переобъявляет топологию.
 
-`SourceSystemInstanceKey` задаётся в конфигурации экземпляра приложения и не принимается из тела сообщения. RabbitMQ-учётная запись должна быть выделена для этого экземпляра и иметь минимальные права.
+## Соответствие фактической схеме БД
+
+- Worker не выполняет DDL, миграции или заполнение справочников.
+- В фактической ekk.SourceObject нет столбца Namespace; применяется существующий уникальный ключ без Namespace. Добавление Namespace требует отдельной согласованной миграции.
+- EntityType, SourceSystem и SourceSystemInstance должны быть заполнены согласованными данными до запуска. Приложение не генерирует коды типов и тестовые записи.
+- Владелец Entity определяется по Entity.CreatedBySourceSystemInstanceKey. EntityTypeOwner и SourceSystemInstancePermission в текущей БД отсутствуют и не используются.
+- Перед запуском требуется проверить ограничения БД и RabbitMQ topology.
+- Outbox Publisher рассчитан на один экземпляр на одну БД; для нескольких экземпляров нужен согласованный механизм захвата строк Outbox.
+
+## Конфигурация
+
+Секреты не хранятся в репозитории. Задайте переменные окружения:
+- Sql__ConnectionString
+- RabbitMq__UserName
+- RabbitMq__Password
+- Ekk__SourceSystemInstanceKey
+- Ekk__SystemCode
+- Ekk__InstanceCode
+
+SourceSystemInstanceKey задаётся конфигурацией установленного экземпляра и не принимается из сообщения.
 
 ## Сборка и запуск
 
-Из корня репозитория:
-
-```powershell
-dotnet restore .\EKK.sln
-dotnet build .\EKK.sln --configuration Release
-dotnet run --project .\src\Ekk.Host\Ekk.Host.csproj
-```
-
-## Формат запроса
-
-Сообщение JSON с общим конвертом ЕКК:
-
-```json
-{
-  "MessageId": "01900000-0000-7000-8000-000000000001",
-  "CorrelationId": "01900000-0000-7000-8000-000000000002",
-  "MessageType": "CompleteEntityRegistration",
-  "SchemaVersion": 1,
-  "CreatedAt": "2026-11-04T12:00:00Z",
-  "Payload": {
-    "EntityId": "01900000-0000-7000-8000-000000000003",
-    "Result": "Registered",
-    "IdempotencyKey": "01900000-0000-7000-8000-000000000004",
-    "ErrorCode": null,
-    "ErrorMessage": null
-  }
-}
-```
-
-Для результата `RegistrationError` поле `ErrorCode` обязательно, `ErrorMessage` необязательно.
-
-## Важные ограничения текущего этапа
-
-- SQL-схема не изменяется.
-- HTTP/IIS, XML-обмен и COM не используются.
-- Транспорт пока обслуживает только `CompleteEntityRegistration`; остальные согласованные операции добавляются отдельными этапами.
-- До подключения к рабочей БД необходимо проверить соответствие строки подключения и RabbitMQ credentials конкретному экземпляру SourceSystemInstance.
-- Текущая реализация предполагает, что владелец Entity определяется через `Entity.CreatedBySourceSystemInstanceKey`.
+Из PowerShell в корне репозитория:
+    dotnet restore .\EKK.sln
+    dotnet build .\EKK.sln --configuration Release
+    dotnet run --project .\src\Ekk.Host\Ekk.Host.csproj

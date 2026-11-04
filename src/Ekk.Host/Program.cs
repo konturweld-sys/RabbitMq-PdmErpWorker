@@ -1,12 +1,11 @@
 using Ekk.Host;
 using Microsoft.Extensions.Hosting;
-
 var builder = Host.CreateApplicationBuilder(args);
-
 builder.Services.Configure<SqlOptions>(builder.Configuration.GetSection("Sql"));
 builder.Services.Configure<RabbitOptions>(builder.Configuration.GetSection("RabbitMq"));
 builder.Services.Configure<EkkOptions>(builder.Configuration.GetSection("Ekk"));
 builder.Services.AddSingleton<RegistrationCompletionService>();
+builder.Services.AddSingleton<EntityRegistrationService>();
 builder.Services.AddHostedService<RabbitMqRequestWorker>();
-
+builder.Services.AddHostedService<OutboxPublisher>();
 await builder.Build().RunAsync();

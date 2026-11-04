@@ -4,148 +4,115 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
-using RabbitMQ.Client.Events;
-
 namespace Ekk.Host;
 
 public sealed class RabbitMqRequestWorker : BackgroundService
 {
-    private readonly RabbitOptions _rabbit;
-    private readonly EkkOptions _ekk;
-    private readonly RegistrationCompletionService _completion;
+    private readonly SqlOptions _sql; private readonly RabbitOptions _rabbit; private readonly EkkOptions _ekk;
+    private readonly RegistrationCompletionService _completion; private readonly EntityRegistrationService _registration;
     private readonly ILogger<RabbitMqRequestWorker> _logger;
-    private IConnection? _connection;
-    private IModel? _channel;
-
-    public RabbitMqRequestWorker(IOptions<RabbitOptions> rabbit, IOptions<EkkOptions> ekk,
-        RegistrationCompletionService completion, ILogger<RabbitMqRequestWorker> logger)
-    {
-        _rabbit = rabbit.Value;
-        _ekk = ekk.Value;
-        _completion = completion;
-        _logger = logger;
-    }
+    public RabbitMqRequestWorker(IOptions<SqlOptions> sql, IOptions<RabbitOptions> rabbit, IOptions<EkkOptions> ekk,
+        RegistrationCompletionService completion, EntityRegistrationService registration, ILogger<RabbitMqRequestWorker> logger)
+    { _sql = sql.Value; _rabbit = rabbit.Value; _ekk = ekk.Value; _completion = completion; _registration = registration; _logger = logger; }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var factory = new ConnectionFactory
-        {
-            HostName = _rabbit.HostName, Port = _rabbit.Port, VirtualHost = _rabbit.VirtualHost,
-            UserName = _rabbit.UserName, Password = _rabbit.Password,
-            AutomaticRecoveryEnabled = true, TopologyRecoveryEnabled = true,
-            ClientProvidedName = $"EKK/{_ekk.SystemCode}/{_ekk.InstanceCode}"
-        };
-
+        ValidateConfiguration();
+        var factory = new ConnectionFactory { HostName = _rabbit.HostName, Port = _rabbit.Port, VirtualHost = _rabbit.VirtualHost,
+            UserName = _rabbit.UserName, Password = _rabbit.Password, AutomaticRecoveryEnabled = true, TopologyRecoveryEnabled = true,
+            ClientProvidedName = $"EKK-Requests/{_ekk.SystemCode}/{_ekk.InstanceCode}" };
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                _connection = factory.CreateConnection();
-                _channel = _connection.CreateModel();
-                _channel.BasicQos(0, _rabbit.PrefetchCount, false);
-                var consumer = new EventingBasicConsumer(_channel);
-                consumer.Received += (_, ea) => HandleMessage(ea, stoppingToken);
-                _channel.BasicConsume(_rabbit.RequestQueue, false, consumer);
-
-                _logger.LogInformation("EKK consumer started. Queue={Queue}", _rabbit.RequestQueue);
-                while (!stoppingToken.IsCancellationRequested && _connection.IsOpen)
-                    await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+                using var connection = factory.CreateConnection(); using var channel = connection.CreateModel();
+                channel.BasicQos(0, 1, false);
+                _logger.LogInformation("Request worker started; queue={Queue}", _rabbit.RequestQueue);
+                while (!stoppingToken.IsCancellationRequested && connection.IsOpen && channel.IsOpen)
+                {
+                    var delivery = channel.BasicGet(_rabbit.RequestQueue, false);
+                    if (delivery is null) { await Task.Delay(_rabbit.PollIntervalMilliseconds, stoppingToken); continue; }
+                    try
+                    {
+                        var response = await ProcessAsync(delivery.Body.ToArray(), stoppingToken);
+                        PublishResponse(channel, delivery, response);
+                        channel.BasicAck(delivery.DeliveryTag, false);
+                    }
+                    catch (JsonException ex)
+                    {
+                        _logger.LogWarning(ex, "Malformed request JSON.");
+                        PublishResponse(channel, delivery, Failure("INVALID_MESSAGE", "Некорректный JSON или обязательные поля отсутствуют."));
+                        channel.BasicAck(delivery.DeliveryTag, false);
+                    }
+                    catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
+                    {
+                        _logger.LogError(ex, "Request processing or response publishing failed; requeue.");
+                        channel.BasicNack(delivery.DeliveryTag, false, true);
+                        await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, _rabbit.RetryDelaySeconds)), stoppingToken);
+                    }
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "RabbitMQ failure. Reconnecting.");
-                try { await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken); }
-                catch (OperationCanceledException) { break; }
-            }
-            finally
-            {
-                try { _channel?.Close(); } catch { }
-                try { _connection?.Close(); } catch { }
-                _channel?.Dispose();
-                _connection?.Dispose();
-                _channel = null;
-                _connection = null;
-            }
+            catch (Exception ex) { _logger.LogError(ex, "RabbitMQ request loop failed; reconnecting."); try { await Task.Delay(5000, stoppingToken); } catch (OperationCanceledException) { break; } }
         }
     }
 
-    private void HandleMessage(BasicDeliverEventArgs ea, CancellationToken stoppingToken)
+    private async Task<OperationResponse> ProcessAsync(byte[] body, CancellationToken ct)
     {
-        try
+        using var doc = JsonDocument.Parse(body); var root = doc.RootElement;
+        if (!root.TryGetProperty("MessageId", out var mid) || mid.ValueKind != JsonValueKind.String || !Guid.TryParse(mid.GetString(), out _) ||
+            !root.TryGetProperty("SchemaVersion", out var sv) || !sv.TryGetInt32(out var version))
+            return Failure("INVALID_MESSAGE", "Отсутствует или некорректен MessageId либо SchemaVersion.");
+        if (version != 1) return Failure("UNSUPPORTED_SCHEMA_VERSION", "Версия контракта не поддерживается.");
+        if (!root.TryGetProperty("MessageType", out var mt) || mt.ValueKind != JsonValueKind.String)
+            return Failure("INVALID_MESSAGE", "Отсутствует MessageType.");
+        Guid? correlationId = null;
+        if (root.TryGetProperty("CorrelationId", out var corr) && corr.ValueKind != JsonValueKind.Null)
         {
-            using var document = JsonDocument.Parse(Encoding.UTF8.GetString(ea.Body.ToArray()));
-            var root = document.RootElement;
-
-            if (!root.TryGetProperty("MessageId", out var messageId) ||
-                !Guid.TryParse(messageId.GetString(), out _) ||
-                !root.TryGetProperty("SchemaVersion", out var schemaVersion) ||
-                !schemaVersion.TryGetInt32(out var version))
-            {
-                PublishAndAck(ea, Failure("INVALID_MESSAGE", "Отсутствует MessageId или SchemaVersion."));
-                return;
-            }
-            if (version != 1)
-            {
-                PublishAndAck(ea, Failure("UNSUPPORTED_SCHEMA_VERSION", "Версия контракта не поддерживается."));
-                return;
-            }
-            if (!root.TryGetProperty("MessageType", out var messageType) ||
-                messageType.GetString() != "CompleteEntityRegistration")
-            {
-                PublishAndAck(ea, Failure("INVALID_MESSAGE", "Неизвестный тип операции."));
-                return;
-            }
-
-            Guid? correlationId = null;
-            if (root.TryGetProperty("CorrelationId", out var correlation) && correlation.ValueKind != JsonValueKind.Null)
-            {
-                if (!Guid.TryParse(correlation.GetString(), out var parsed))
-                {
-                    PublishAndAck(ea, Failure("INVALID_MESSAGE", "Некорректный CorrelationId."));
-                    return;
-                }
-                correlationId = parsed;
-            }
-
-            var payload = root.GetProperty("Payload");
-            var request = new CompletionRequest(
-                payload.GetProperty("EntityId").GetGuid(),
-                payload.GetProperty("Result").GetString() ?? "",
-                payload.GetProperty("IdempotencyKey").GetGuid(),
-                payload.TryGetProperty("ErrorCode", out var errorCode) && errorCode.ValueKind != JsonValueKind.Null ? errorCode.GetString() : null,
-                payload.TryGetProperty("ErrorMessage", out var errorMessage) && errorMessage.ValueKind != JsonValueKind.Null ? errorMessage.GetString() : null,
-                correlationId);
-
-            var response = _completion.CompleteAsync(request, stoppingToken).GetAwaiter().GetResult();
-            PublishAndAck(ea, response, correlationId);
+            if (corr.ValueKind != JsonValueKind.String || !Guid.TryParse(corr.GetString(), out var parsed))
+                return Failure("INVALID_MESSAGE", "Некорректный CorrelationId.");
+            correlationId = parsed;
         }
-        catch (JsonException ex)
+        if (!root.TryGetProperty("Payload", out var p) || p.ValueKind != JsonValueKind.Object)
+            return Failure("INVALID_MESSAGE", "Отсутствует объект Payload.");
+        switch (mt.GetString())
         {
-            _logger.LogWarning(ex, "Invalid JSON request.");
-            PublishAndAck(ea, Failure("INVALID_MESSAGE", "Некорректный JSON или отсутствуют обязательные поля."));
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Request processing failed; message will be requeued.");
-            try { _channel?.BasicNack(ea.DeliveryTag, false, true); } catch { }
+            case "CompleteEntityRegistration":
+                return await _completion.CompleteAsync(new CompletionRequest(p.GetProperty("EntityId").GetGuid(),
+                    p.GetProperty("Result").GetString() ?? "", p.GetProperty("IdempotencyKey").GetGuid(),
+                    OptionalString(p, "ErrorCode"), OptionalString(p, "ErrorMessage"), correlationId), ct);
+            case "RegisterEntity":
+                return Convert(await _registration.RegisterEntityAsync(new RegisterEntityRequest(
+                    p.GetProperty("EntityTypeCode").GetString() ?? "", p.GetProperty("IdempotencyKey").GetGuid(), correlationId), ct));
+            case "RegisterSourceObject":
+                return Convert(await _registration.RegisterSourceObjectAsync(new RegisterSourceObjectRequest(
+                    p.GetProperty("EntityId").GetGuid(), p.GetProperty("ExternalObjectType").GetString() ?? "",
+                    p.GetProperty("ExternalObjectId").GetString() ?? "", OptionalString(p, "ExternalObjectCode"),
+                    OptionalString(p, "ExternalObjectName"), p.GetProperty("IdempotencyKey").GetGuid(), correlationId), ct));
+            default: return Failure("UNKNOWN_OPERATION", "Неизвестный тип операции.");
         }
     }
 
-    private static OperationResponse Failure(string code, string message) =>
-        new(false, code, null, new(code, message, false, false));
-
-    private void PublishAndAck(BasicDeliverEventArgs ea, OperationResponse response, Guid? correlationId = null)
+    private void PublishResponse(IModel channel, BasicGetResult delivery, OperationResponse response)
     {
-        var channel = _channel ?? throw new InvalidOperationException("RabbitMQ channel is unavailable.");
-        var properties = channel.CreateBasicProperties();
-        properties.Persistent = true;
-        properties.ContentType = "application/json";
-        properties.ContentEncoding = "utf-8";
-        properties.CorrelationId = correlationId?.ToString("D") ?? ea.BasicProperties.CorrelationId;
-        var routingKey = $"response.{_ekk.SystemCode}.{_ekk.InstanceCode}.CompleteEntityRegistration";
-        channel.BasicPublish(_rabbit.ResponseExchange, routingKey, properties,
-            Encoding.UTF8.GetBytes(JsonSerializer.Serialize(response)));
-        channel.BasicAck(ea.DeliveryTag, false);
+        channel.ConfirmSelect();
+        var props = channel.CreateBasicProperties(); props.Persistent = true; props.ContentType = "application/json";
+        props.ContentEncoding = "utf-8"; props.CorrelationId = delivery.BasicProperties.CorrelationId;
+        props.MessageId = Guid.CreateVersion7().ToString("D");
+        var route = $"response.{_ekk.SystemCode}.{_ekk.InstanceCode}.{delivery.BasicProperties.Type ?? "Request"}";
+        channel.BasicPublish(_rabbit.ResponseExchange, route, true, props, Encoding.UTF8.GetBytes(JsonSerializer.Serialize(response)));
+        channel.WaitForConfirmsOrDie(TimeSpan.FromSeconds(10));
+    }
+    private static string? OptionalString(JsonElement p, string n) => p.TryGetProperty(n, out var v) && v.ValueKind != JsonValueKind.Null ? v.GetString() : null;
+    private static OperationResponse Convert(RegistrationResult r) => new(r.Success, r.ResponseCode,
+        r.EntityId is Guid id ? new CompletionPayload(id, r.RegistrationStatus ?? "", DateTime.UtcNow) : null, r.Error);
+    private static OperationResponse Failure(string code, string message) => new(false, code, null, new OperationError(code, message, false, false));
+    private void ValidateConfiguration()
+    {
+        if (string.IsNullOrWhiteSpace(_sql.ConnectionString)) throw new InvalidOperationException("Sql:ConnectionString must be configured.");
+        if (_ekk.SourceSystemInstanceKey <= 0 || string.IsNullOrWhiteSpace(_ekk.SystemCode) || string.IsNullOrWhiteSpace(_ekk.InstanceCode))
+            throw new InvalidOperationException("Ekk source instance key and codes must be configured.");
+        if (string.IsNullOrWhiteSpace(_rabbit.UserName) || string.IsNullOrWhiteSpace(_rabbit.Password))
+            throw new InvalidOperationException("RabbitMQ credentials must be configured.");
     }
 }

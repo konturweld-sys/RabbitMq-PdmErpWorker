@@ -95,8 +95,9 @@ public sealed class RegistrationCompletionService
         catch (SqlException ex)
         {
             await SafeRollbackAsync(transaction);
-            _logger.LogError(ex, "SQL failure in {OperationCode} for EntityId {EntityId}", OperationCode, request.EntityId);
-            return Failure("TEMPORARY_FAILURE", "Временная ошибка SQL Server.", true, true);
+            _logger.LogError(ex, "SQL failure in {OperationCode} for EntityId {EntityId}; request must be retried",
+                OperationCode, request.EntityId);
+            throw;
         }
         catch (Exception ex)
         {
