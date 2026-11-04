@@ -129,9 +129,9 @@ public sealed class RegistrationCompletionService
         if (r.Result is not ("Registered" or "RegistrationError")) return "INVALID_PAYLOAD";
         if (r.Result == "Registered" && (r.ErrorCode is not null || r.ErrorMessage is not null))
             return "INVALID_PAYLOAD";
-        if (r.Result == "RegistrationError" && (string.IsNullOrWhiteSpace(r.ErrorCode) || r.ErrorCode.Length > 64))
+        if (r.Result == "RegistrationError" && (string.IsNullOrWhiteSpace(r.ErrorCode) || r.ErrorCode.Length > 128))
             return "INVALID_PAYLOAD";
-        if (r.ErrorMessage?.Length > 2000) return "INVALID_PAYLOAD";
+        if (r.ErrorMessage?.Length > 4000) return "INVALID_PAYLOAD";
         return null;
     }
 
@@ -190,8 +190,8 @@ public sealed class RegistrationCompletionService
         cmd.Parameters.AddWithValue("@EntityKey", entityKey);
         cmd.Parameters.AddWithValue("@RegistrationStatus", r.Result);
         cmd.Parameters.AddWithValue("@ChangedAt", changedAt);
-        cmd.Parameters.Add("@ErrorCode", System.Data.SqlDbType.NVarChar, 64).Value = (object?)r.ErrorCode ?? DBNull.Value;
-        cmd.Parameters.Add("@ErrorMessage", System.Data.SqlDbType.NVarChar, 2000).Value = (object?)r.ErrorMessage ?? DBNull.Value;
+        cmd.Parameters.Add("@ErrorCode", System.Data.SqlDbType.NVarChar, 128).Value = (object?)r.ErrorCode ?? DBNull.Value;
+        cmd.Parameters.Add("@ErrorMessage", System.Data.SqlDbType.NVarChar, 4000).Value = (object?)r.ErrorMessage ?? DBNull.Value;
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
