@@ -27,6 +27,7 @@ public sealed class RabbitMqRequestWorker : BackgroundService
             {
                 using var connection = factory.CreateConnection(); using var channel = connection.CreateModel();
                 channel.BasicQos(0, 1, false);
+                channel.ConfirmSelect();
                 _logger.LogInformation("Request worker started; queue={Queue}", _rabbit.RequestQueue);
                 while (!stoppingToken.IsCancellationRequested && connection.IsOpen && channel.IsOpen)
                 {
@@ -95,7 +96,6 @@ public sealed class RabbitMqRequestWorker : BackgroundService
 
     private void PublishResponse(IModel channel, BasicGetResult delivery, OperationResponse response)
     {
-        channel.ConfirmSelect();
         var props = channel.CreateBasicProperties(); props.Persistent = true; props.ContentType = "application/json";
         props.ContentEncoding = "utf-8"; props.CorrelationId = delivery.BasicProperties.CorrelationId;
         props.MessageId = Guid.CreateVersion7().ToString("D");
