@@ -132,9 +132,25 @@ public sealed class RabbitMqRequestWorker : BackgroundService
     private void ValidateConfiguration()
     {
         if (string.IsNullOrWhiteSpace(_sql.ConnectionString)) throw new InvalidOperationException("Sql:ConnectionString must be configured.");
+        if (_sql.CommandTimeoutSeconds <= 0) throw new InvalidOperationException("Sql:CommandTimeoutSeconds must be positive.");
         if (_ekk.SourceSystemInstanceKey <= 0 || string.IsNullOrWhiteSpace(_ekk.SystemCode) || string.IsNullOrWhiteSpace(_ekk.InstanceCode))
             throw new InvalidOperationException("Ekk source instance key and codes must be configured.");
         if (string.IsNullOrWhiteSpace(_rabbit.UserName) || string.IsNullOrWhiteSpace(_rabbit.Password))
             throw new InvalidOperationException("RabbitMQ credentials must be configured.");
+    }
+
+    private async Task ValidateSourceSystemInstanceAsync(CancellationToken ct)
+    {
+        const string sql = "SELECT COUNT_BIG(1) FROM ekk.SourceSystemInstance AS i INNER JOIN ekk.SourceSystem AS s ON s.SourceSystemKey=i.SourceSystemKey WHERE i.SourceSystemInstanceKey=@Key AND i.Code=@InstanceCode AND s.Code=@SystemCode AND i.IsActive=1 AND s.IsActive=1;";
+        await using var connection = new SqlConnection(_sql.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new SqlCommand(sql, connection) { CommandTimeout = _sql.CommandTimeoutSeconds };
+        command.Parameters.Add("@Key", SqlDbType.BigInt).Value = _ekk.SourceSystemInstanceKey;
+        command.Parameters.Add("@InstanceCode", SqlDbType.NVarChar, 128).Value = _ekk.InstanceCode;
+        command.Parameters.Add("@SystemCode", SqlDbType.NVarChar, 128).Value = _ekk.SystemCode;
+        var count = Convert.ToInt64(await command.ExecuteScalarAsync(ct));
+        if (count != 1)
+            throw new InvalidOperationException("Configured EKK source system instance is missing, inactive, or does not match SystemCode/InstanceCode.");
+        _logger.LogInformation("EKK source instance validated: {SystemCode}/{InstanceCode}, key={InstanceKey}", _ekk.SystemCode, _ekk.InstanceCode, _ekk.SourceSystemInstanceKey);
     }
 }
