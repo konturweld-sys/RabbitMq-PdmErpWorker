@@ -54,16 +54,12 @@ public sealed class RegistrationCompletionService
 
             var entity = await LockEntityAsync(connection, transaction, request.EntityId, cancellationToken);
             if (entity is null)
-            {
-                await transaction.RollbackAsync(cancellationToken);
-                return Failure("ENTITY_NOT_FOUND", "Entity не найдена.");
-            }
+                return await SaveBusinessFailureAsync(connection, transaction, request, requestHash, null,
+                    "ENTITY_NOT_FOUND", "Entity не найдена.", cancellationToken);
 
             if (entity.CreatedBySourceSystemInstanceKey != _ekk.SourceSystemInstanceKey)
-            {
-                await transaction.RollbackAsync(cancellationToken);
-                return Failure("FORBIDDEN", "Отправитель не является системой-владельцем Entity.");
-            }
+                return await SaveBusinessFailureAsync(connection, transaction, request, requestHash, request.EntityId,
+                    "FORBIDDEN", "Отправитель не является системой-владельцем Entity.", cancellationToken);
 
             OperationResponse response;
             if (entity.RegistrationStatus == "RegistrationPending")
@@ -79,21 +75,20 @@ public sealed class RegistrationCompletionService
                 if (previous is null ||
                     !string.Equals(previous.ErrorCode, request.ErrorCode, StringComparison.Ordinal) ||
                     !string.Equals(previous.ErrorMessage, request.ErrorMessage, StringComparison.Ordinal))
-                {
-                    await transaction.RollbackAsync(cancellationToken);
-                    return Failure("REGISTRATION_STATE_CONFLICT", "Конечный статус уже установлен с другим результатом.");
-                }
+                    return await SaveBusinessFailureAsync(connection, transaction, request, requestHash, request.EntityId,
+                        "REGISTRATION_STATE_CONFLICT", "Конечный статус уже установлен с другим результатом.", cancellationToken);
+
                 response = Success("ALREADY_COMPLETED", request, previous.ChangedAt);
             }
             else
             {
-                await transaction.RollbackAsync(cancellationToken);
-                return Failure("REGISTRATION_STATE_CONFLICT", "Невозможно изменить уже установленный конечный статус.");
+                return await SaveBusinessFailureAsync(connection, transaction, request, requestHash, request.EntityId,
+                    "REGISTRATION_STATE_CONFLICT", "Невозможно изменить уже установленный конечный статус.", cancellationToken);
             }
 
             var responseJson = JsonSerializer.Serialize(response);
             await SaveIdempotencyAsync(connection, transaction, request, requestHash,
-                response.ResponseCode, responseJson, cancellationToken);
+                response.ResponseCode, responseJson, request.EntityId, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             return response;
         }
@@ -109,6 +104,16 @@ public sealed class RegistrationCompletionService
             _logger.LogError(ex, "Unexpected failure in {OperationCode} for EntityId {EntityId}", OperationCode, request.EntityId);
             return Failure("INTERNAL_ERROR", "Внутренняя ошибка ЕКК.", false, true);
         }
+    }
+
+    private async Task<OperationResponse> SaveBusinessFailureAsync(
+        SqlConnection c, SqlTransaction t, CompletionRequest r, byte[] hash, Guid? entityId,
+        string code, string message, CancellationToken ct)
+    {
+        var response = Failure(code, message);
+        await SaveIdempotencyAsync(c, t, r, hash, code, JsonSerializer.Serialize(response), entityId, ct);
+        await t.CommitAsync(ct);
+        return response;
     }
 
     private static string? Validate(CompletionRequest r)
@@ -200,7 +205,7 @@ public sealed class RegistrationCompletionService
     }
 
     private async Task SaveIdempotencyAsync(SqlConnection c, SqlTransaction t, CompletionRequest r,
-        byte[] hash, string responseCode, string responsePayload, CancellationToken ct)
+        byte[] hash, string responseCode, string responsePayload, Guid? entityId, CancellationToken ct)
     {
         const string sql = """
             INSERT INTO ekk.RequestIdempotency
@@ -217,7 +222,7 @@ public sealed class RegistrationCompletionService
         cmd.Parameters.Add("@RequestHash", System.Data.SqlDbType.Binary, 32).Value = hash;
         cmd.Parameters.AddWithValue("@ResponseCode", responseCode);
         cmd.Parameters.Add("@ResponsePayload", System.Data.SqlDbType.NVarChar, -1).Value = responsePayload;
-        cmd.Parameters.AddWithValue("@EntityId", r.EntityId);
+        cmd.Parameters.Add("@EntityId", System.Data.SqlDbType.UniqueIdentifier).Value = (object?)entityId ?? DBNull.Value;
         cmd.Parameters.AddWithValue("@CorrelationId", (object?)r.CorrelationId ?? Guid.Empty);
         await cmd.ExecuteNonQueryAsync(ct);
     }
