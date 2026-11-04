@@ -1,5 +1,7 @@
-**/bin/
-**/obj/
+bin/
+obj/
+.vs/
+*.user
+*.suo
 .env
-.env.*
-!.env.example
+appsettings.Local.json

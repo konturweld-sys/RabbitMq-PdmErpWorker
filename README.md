@@ -1,93 +1,88 @@
-# Тестовый перенос 1С PDM → RabbitMQ → 1С ERP
+# ЕКК — единое корпоративное ядро
 
-Репозиторий содержит одноразовый Windows Worker для переноса видов номенклатуры, затем номенклатуры, из PDM в ERP через RabbitMQ. Worker читает данные PDM через существующий COM-модуль _кадИнтеграцияВызов, публикует устойчивые сообщения и подтверждает их в RabbitMQ только после HTTP-ответа ERP с success=true.
+Новая реализация ЕКК на .NET 10 LTS.
 
-## Безопасность
+## Текущий объём
 
-- Worker требует ERP_TARGET=TEST и завершается до подключения к PDM/RabbitMQ, если флаг не задан.
-- ERP_ENDPOINT задаётся явно. Перед запуском вручную проверьте, что URL ведёт именно в тестовую базу ERP.
-- Пароли не хранятся в репозитории; задаются переменными окружения.
-- Worker не изменяет PDM: экспорт выполняется только чтением.
-- Очередь и DLQ имеют отдельные тестовые имена.
-- Сообщения с ошибкой ERP отправляются в DLQ и не подтверждаются как успешно обработанные.
-- Идентификатор сообщения детерминирован от типа события, источника и ссылки. Повторный запуск использует тот же MessageId.
+Первая реализация — обработка операции `CompleteEntityRegistration`:
 
-## Что подготовить в 1С
+- только система-владелец может завершить регистрацию Entity;
+- допустимые переходы: `RegistrationPending → Registered` и `RegistrationPending → RegistrationError`;
+- текущий статус, история регистрации и результат идемпотентности фиксируются одной SQL-транзакцией;
+- повтор с тем же ключом и тем же содержимым возвращает сохранённый ответ;
+- повторное использование ключа с другим содержимым возвращает `IDEMPOTENCY_KEY_REUSE`;
+- повторное завершение тем же результатом не создаёт дополнительную запись истории;
+- EntityId не удаляется и не переиспользуется.
 
-1. В PDM загрузить и обновить расширение из ветки feature/test-pdm-erp-transfer репозитория 1C_PDM_Enhanced. Убедиться, что общий модуль _кадИнтеграцияВызов доступен через внешнее соединение.
-2. В ERP загрузить и обновить расширение из ветки feature/test-pdm-erp-transfer репозитория 1C_ERP_Enhanced.
-3. Опубликовать HTTP-сервис СоздатьИзделие на тестовой базе. ERP_ENDPOINT должен содержать полный адрес HTTP-шаблона /items. Путь публикации и имя базы на сервере необходимо проверить на месте.
-4. Убедиться, что в тестовой ERP существуют нужные единицы измерения. Автоматическое создание единиц не выполняется.
-5. Настроить Basic Authentication для HTTP-сервиса и права пользователя на чтение/создание видов номенклатуры, номенклатуры и запись регистра Расш1_ОбработанныеСообщения.
+## Структура
 
-## Сборка
+```
+EKK.sln
+src/
+  Ekk.Host/
+    Program.cs
+    RabbitMqRequestWorker.cs
+    RegistrationCompletionService.cs
+    Ekk.Host.csproj
+    appsettings.json
+```
 
-На Windows с установленным .NET SDK 9 и 64-разрядной платформой 1С PDM:
+## Требования
 
-    dotnet restore .\src\RabbitMqPdmErpWorker\RabbitMqPdmErpWorker.csproj
-    dotnet build .\src\RabbitMqPdmErpWorker\RabbitMqPdmErpWorker.csproj -c Release
+- .NET 10 SDK
+- SQL Server с уже развёрнутой согласованной схемой ЕКК
+- RabbitMQ с очередью `ekk.requests` и exchange `ekk.responses`
 
-## Переменные окружения PowerShell
+## Настройка
 
-Задайте реальные тестовые параметры в текущем окне PowerShell. Пароли не вводите в файл и не коммитьте:
+Не храните пароли в репозитории. Перед запуском задайте переменные окружения:
 
-    $env:ERP_TARGET = 'TEST'
-    $env:PDM_CONNECTION_STRING = 'Srvr="192.168.50.173";Ref="1C_pdm";Usr="Администратор";Pwd="<PDM_PASSWORD>";'
-    $env:ERP_ENDPOINT = 'http://<ERP_TEST_HOST>/<ERP_TEST_PUBLICATION>/hs/СоздатьИзделие/items'
-    $env:ERP_USER = '<ERP_HTTP_USER>'
-    $env:ERP_PASSWORD = '<ERP_HTTP_PASSWORD>'
-    $env:RABBITMQ_HOST = '192.168.50.173'
-    $env:RABBITMQ_PORT = '5672'
-    $env:RABBITMQ_VHOST = '/'
-    $env:RABBITMQ_USER = '<RABBITMQ_USER>'
-    $env:RABBITMQ_PASSWORD = '<RABBITMQ_PASSWORD>'
+- `Sql__ConnectionString`
+- `RabbitMq__UserName`
+- `RabbitMq__Password`
+- `Ekk__SourceSystemInstanceKey`
+- `Ekk__SystemCode`
+- `Ekk__InstanceCode`
 
-PDM_CONNECTION_STRING должен использовать зарегистрированный на машине запуска V83.COMConnector платформы PDM 8.3.12.1529. Не меняйте регистрацию COM на платформу ERP.
+`SourceSystemInstanceKey` задаётся в конфигурации экземпляра приложения и не принимается из тела сообщения. RabbitMQ-учётная запись должна быть выделена для этого экземпляра и иметь минимальные права.
 
-## Одноразовый запуск
+## Сборка и запуск
 
-    dotnet run --project .\src\RabbitMqPdmErpWorker\RabbitMqPdmErpWorker.csproj -c Release
+Из корня репозитория:
 
-Worker выгружает снимок, публикует сначала все виды, затем все позиции и ждёт ответ ERP на каждое сообщение. Код завершения 0 означает, что каждый ответ ERP содержал HTTP 2xx и success=true. При RESULT=FAILED анализируйте сообщение и DLQ до повторного запуска.
+```powershell
+dotnet restore .\EKK.sln
+dotnet build .\EKK.sln --configuration Release
+dotnet run --project .\src\Ekk.Host\Ekk.Host.csproj
+```
 
-## Контракт сообщений
+## Формат запроса
 
-Вид номенклатуры:
+Сообщение JSON с общим конвертом ЕКК:
 
-    {
-      "schemaVersion": 1,
-      "messageId": "<стабильный UUID>",
-      "eventType": "nomenclatureView.created",
-      "sourceSystem": "1C_PDM",
-      "sourceRef": "<UUID вида в PDM>",
-      "itemName": "<точное наименование вида>",
-      "nomenclatureType": "Товар",
-      "storageUnit": "<представление единицы>",
-      "usesCharacteristics": false
-    }
+```json
+{
+  "MessageId": "01900000-0000-7000-8000-000000000001",
+  "CorrelationId": "01900000-0000-7000-8000-000000000002",
+  "MessageType": "CompleteEntityRegistration",
+  "SchemaVersion": 1,
+  "CreatedAt": "2026-11-04T12:00:00Z",
+  "Payload": {
+    "EntityId": "01900000-0000-7000-8000-000000000003",
+    "Result": "Registered",
+    "IdempotencyKey": "01900000-0000-7000-8000-000000000004",
+    "ErrorCode": null,
+    "ErrorMessage": null
+  }
+}
+```
 
-Номенклатура:
+Для результата `RegistrationError` поле `ErrorCode` обязательно, `ErrorMessage` необязательно.
 
-    {
-      "schemaVersion": 1,
-      "messageId": "<стабильный UUID>",
-      "eventType": "nomenclature.created",
-      "sourceSystem": "1C_PDM",
-      "sourceRef": "<UUID позиции в PDM>",
-      "itemName": "<точное наименование позиции>",
-      "nomenclatureView": "<точное наименование вида>",
-      "nomenclatureViewSourceRef": "<UUID вида в PDM>",
-      "nomenclatureType": "Товар",
-      "storageUnit": "<представление единицы>",
-      "usesCharacteristics": false
-    }
+## Важные ограничения текущего этапа
 
-## Ограничения текущего тестового приёмника
-
-- Тестовый приёмник ERP поддерживает тип Товар для видов и позиций. Другие типы отклоняются, а не преобразуются молча.
-- Виды с включёнными характеристиками отклоняются.
-- Если единица не найдена в ERP или точное имя уже связано с другими реквизитами, сообщение отклоняется.
-- Это одноразовый пакетный запуск, не Windows-служба и не непрерывный синхронизатор.
-- Пакет включает все не удалённые виды и позиции из PDM. Перед первым запуском проверьте размер выгрузки.
-- Автоматическое обновление уже созданных объектов не выполняется.
-- Загрузку/публикацию расширений и проверку фактической записи в вашей тестовой базе нужно выполнить на сервере 1С. GitHub не позволяет подтвердить компиляцию BSL или состояние конкретной базы.
+- SQL-схема не изменяется.
+- HTTP/IIS, XML-обмен и COM не используются.
+- Транспорт пока обслуживает только `CompleteEntityRegistration`; остальные согласованные операции добавляются отдельными этапами.
+- До подключения к рабочей БД необходимо проверить соответствие строки подключения и RabbitMQ credentials конкретному экземпляру SourceSystemInstance.
+- Текущая реализация предполагает, что владелец Entity определяется через `Entity.CreatedBySourceSystemInstanceKey`.
