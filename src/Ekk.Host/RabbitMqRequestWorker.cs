@@ -1,4 +1,6 @@
+using System.Data;
 using System.Text;
+using Microsoft.Data.SqlClient;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -19,6 +21,7 @@ public sealed class RabbitMqRequestWorker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         ValidateConfiguration();
+        await ValidateSourceSystemInstanceAsync(stoppingToken);
         var factory = new ConnectionFactory { HostName = _rabbit.HostName, Port = _rabbit.Port, VirtualHost = _rabbit.VirtualHost,
             UserName = _rabbit.UserName, Password = _rabbit.Password, AutomaticRecoveryEnabled = true, TopologyRecoveryEnabled = true,
             ClientProvidedName = $"EKK-Requests/{_ekk.SystemCode}/{_ekk.InstanceCode}" };
@@ -84,10 +87,10 @@ public sealed class RabbitMqRequestWorker : BackgroundService
                     p.GetProperty("Result").GetString() ?? "", p.GetProperty("IdempotencyKey").GetGuid(),
                     OptionalString(p, "ErrorCode"), OptionalString(p, "ErrorMessage"), correlationId), ct);
             case "RegisterEntity":
-                return Convert(await _registration.RegisterEntityAsync(new RegisterEntityRequest(
+                return ToOperationResponse(await _registration.RegisterEntityAsync(new RegisterEntityRequest(
                     p.GetProperty("EntityTypeCode").GetString() ?? "", p.GetProperty("IdempotencyKey").GetGuid(), correlationId), ct));
             case "RegisterSourceObject":
-                return Convert(await _registration.RegisterSourceObjectAsync(new RegisterSourceObjectRequest(
+                return ToOperationResponse(await _registration.RegisterSourceObjectAsync(new RegisterSourceObjectRequest(
                     p.GetProperty("EntityId").GetGuid(), p.GetProperty("ExternalObjectType").GetString() ?? "",
                     p.GetProperty("ExternalObjectId").GetString() ?? "", OptionalString(p, "ExternalObjectCode"),
                     OptionalString(p, "ExternalObjectName"), p.GetProperty("IdempotencyKey").GetGuid(), correlationId), ct));
@@ -123,15 +126,31 @@ public sealed class RabbitMqRequestWorker : BackgroundService
         finally { channel.BasicReturn -= onReturn; }
     }
     private static string? OptionalString(JsonElement p, string n) => p.TryGetProperty(n, out var v) && v.ValueKind != JsonValueKind.Null ? v.GetString() : null;
-    private static OperationResponse Convert(RegistrationResult r) => new(r.Success, r.ResponseCode,
+    private static OperationResponse ToOperationResponse(RegistrationResult r) => new(r.Success, r.ResponseCode,
         r.EntityId is Guid id ? new CompletionPayload(id, r.RegistrationStatus ?? "", DateTime.UtcNow) : null, r.Error);
     private static OperationResponse Failure(string code, string message) => new(false, code, null, new OperationError(code, message, false, false));
     private void ValidateConfiguration()
     {
         if (string.IsNullOrWhiteSpace(_sql.ConnectionString)) throw new InvalidOperationException("Sql:ConnectionString must be configured.");
+        if (_sql.CommandTimeoutSeconds <= 0) throw new InvalidOperationException("Sql:CommandTimeoutSeconds must be positive.");
         if (_ekk.SourceSystemInstanceKey <= 0 || string.IsNullOrWhiteSpace(_ekk.SystemCode) || string.IsNullOrWhiteSpace(_ekk.InstanceCode))
             throw new InvalidOperationException("Ekk source instance key and codes must be configured.");
         if (string.IsNullOrWhiteSpace(_rabbit.UserName) || string.IsNullOrWhiteSpace(_rabbit.Password))
             throw new InvalidOperationException("RabbitMQ credentials must be configured.");
+    }
+
+    private async Task ValidateSourceSystemInstanceAsync(CancellationToken ct)
+    {
+        const string sql = "SELECT COUNT_BIG(1) FROM ekk.SourceSystemInstance AS i INNER JOIN ekk.SourceSystem AS s ON s.SourceSystemKey=i.SourceSystemKey WHERE i.SourceSystemInstanceKey=@Key AND i.Code=@InstanceCode AND s.Code=@SystemCode AND i.IsActive=1 AND s.IsActive=1;";
+        await using var connection = new SqlConnection(_sql.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new SqlCommand(sql, connection) { CommandTimeout = _sql.CommandTimeoutSeconds };
+        command.Parameters.Add("@Key", SqlDbType.BigInt).Value = _ekk.SourceSystemInstanceKey;
+        command.Parameters.Add("@InstanceCode", SqlDbType.NVarChar, 128).Value = _ekk.InstanceCode;
+        command.Parameters.Add("@SystemCode", SqlDbType.NVarChar, 128).Value = _ekk.SystemCode;
+        var count = System.Convert.ToInt64(await command.ExecuteScalarAsync(ct));
+        if (count != 1)
+            throw new InvalidOperationException("Configured EKK source system instance is missing, inactive, or does not match SystemCode/InstanceCode.");
+        _logger.LogInformation("EKK source instance validated: {SystemCode}/{InstanceCode}, key={InstanceKey}", _ekk.SystemCode, _ekk.InstanceCode, _ekk.SourceSystemInstanceKey);
     }
 }

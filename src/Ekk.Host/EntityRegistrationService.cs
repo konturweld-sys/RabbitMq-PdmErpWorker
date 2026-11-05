@@ -26,17 +26,45 @@ public sealed class EntityRegistrationService
             {
                 if (string.IsNullOrWhiteSpace(request.EntityTypeCode) || request.EntityTypeCode.Length > 128)
                     return Failure("INVALID_PAYLOAD", "EntityTypeCode обязателен (не более 128 символов).");
-                const string typeSql = "SELECT EntityTypeKey FROM ekk.EntityType WITH (UPDLOCK,HOLDLOCK) WHERE Code=@Code AND IsActive=1;";
+                const string typeSql = """
+                    SELECT et.EntityTypeKey, eto.SourceSystemKey, instance.SourceSystemKey
+                    FROM ekk.EntityType AS et WITH (UPDLOCK,HOLDLOCK)
+                    LEFT JOIN ekk.EntityTypeOwner AS eto WITH (UPDLOCK,HOLDLOCK)
+                        ON eto.EntityTypeKey = et.EntityTypeKey
+                    INNER JOIN ekk.SourceSystemInstance AS instance
+                        ON instance.SourceSystemInstanceKey = @InstanceKey
+                       AND instance.IsActive = 1
+                    INNER JOIN ekk.SourceSystem AS instanceSystem
+                        ON instanceSystem.SourceSystemKey = instance.SourceSystemKey
+                       AND instanceSystem.IsActive = 1
+                    WHERE et.Code = @Code AND et.IsActive = 1;
+                    """;
                 await using var typeCmd = new SqlCommand(typeSql, c, t) { CommandTimeout = _sql.CommandTimeoutSeconds };
                 typeCmd.Parameters.Add("@Code", SqlDbType.NVarChar, 128).Value = request.EntityTypeCode;
-                var typeValue = await typeCmd.ExecuteScalarAsync(ct);
-                if (typeValue is null || typeValue == DBNull.Value)
-                    return Failure("ENTITY_TYPE_NOT_FOUND", "Активный EntityType с указанным Code не найден.");
+                typeCmd.Parameters.Add("@InstanceKey", SqlDbType.BigInt).Value = _ekk.SourceSystemInstanceKey;
+                long? entityTypeKey = null;
+                long? ownerSystemKey = null;
+                long? instanceSystemKey = null;
+                await using (var reader = await typeCmd.ExecuteReaderAsync(ct))
+                {
+                    if (await reader.ReadAsync(ct))
+                    {
+                        entityTypeKey = reader.GetInt64(0);
+                        ownerSystemKey = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+                        instanceSystemKey = reader.GetInt64(2);
+                    }
+                }
+                if (entityTypeKey is null)
+                    return Failure("ENTITY_TYPE_NOT_FOUND", "Активный EntityType с указанным Code не найден либо экземпляр-инициатор неактивен.");
+                if (ownerSystemKey is null)
+                    return Failure("ENTITY_TYPE_OWNER_NOT_CONFIGURED", "Для EntityType не назначена система-владелец.");
+                if (ownerSystemKey != instanceSystemKey)
+                    return Failure("FORBIDDEN_ENTITY_TYPE_OWNER", "Настроенный экземпляр системы не является владельцем указанного EntityType.");
                 var entityId = Guid.CreateVersion7();
                 const string insertSql = "INSERT INTO ekk.Entity (EntityId,EntityTypeKey,CreatedBySourceSystemInstanceKey,RegistrationStatus) OUTPUT INSERTED.EntityKey VALUES (@EntityId,@EntityTypeKey,@SourceSystemInstanceKey,'RegistrationPending');";
                 await using var insert = new SqlCommand(insertSql, c, t) { CommandTimeout = _sql.CommandTimeoutSeconds };
                 insert.Parameters.Add("@EntityId", SqlDbType.UniqueIdentifier).Value = entityId;
-                insert.Parameters.Add("@EntityTypeKey", SqlDbType.BigInt).Value = Convert.ToInt64(typeValue);
+                insert.Parameters.Add("@EntityTypeKey", SqlDbType.BigInt).Value = entityTypeKey.Value;
                 insert.Parameters.Add("@SourceSystemInstanceKey", SqlDbType.BigInt).Value = _ekk.SourceSystemInstanceKey;
                 var entityKey = Convert.ToInt64(await insert.ExecuteScalarAsync(ct));
                 await InsertOutboxAsync(c, t, entityKey, entityId, "EntityCreated", "entity.created",

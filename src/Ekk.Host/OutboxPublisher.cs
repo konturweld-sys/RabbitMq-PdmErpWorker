@@ -58,7 +58,8 @@ public sealed class OutboxPublisher : BackgroundService
     private async Task<List<OutboxRecord>> ReadPendingAsync(CancellationToken ct)
     {
         var rows = new List<OutboxRecord>();
-        const string sql = @"SELECT TOP (@BatchSize) OutboxMessageKey,MessageId,EventType,EntityId,EntitySequence,RoutingKey,Payload,AttemptCount
+        const string sql = @"SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SELECT TOP (@BatchSize) OutboxMessageKey,MessageId,EventType,EntityId,EntitySequence,RoutingKey,Payload,AttemptCount
 FROM ekk.OutboxMessage WITH (READPAST)
 WHERE Status='Pending' AND (NextAttemptAt IS NULL OR NextAttemptAt<=SYSUTCDATETIME())
 AND NOT EXISTS (SELECT 1 FROM ekk.OutboxMessage earlier

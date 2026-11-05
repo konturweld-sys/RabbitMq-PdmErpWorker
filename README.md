@@ -4,7 +4,7 @@ Worker ЕКК на .NET 10: RPC через RabbitMQ, транзакционна�
 
 ## Операции
 
-- **RegisterEntity** — создаёт Entity с UUIDv7; EntityTypeCode разрешается только по активной записи ekk.EntityType. Начальный статус — RegistrationPending.
+- **RegisterEntity** — создаёт Entity с UUIDv7 только если активный EntityType назначен системе-владельцу настроенного SourceSystemInstance. Начальный статус — RegistrationPending.
 - **RegisterSourceObject** — связывает локальный объект с Entity по уникальной идентичности (SourceSystemInstanceKey, ExternalObjectType, ExternalObjectId).
 - **CompleteEntityRegistration** — переводит Entity из RegistrationPending в Registered или RegistrationError и одновременно записывает историю.
 
@@ -33,8 +33,10 @@ Outbox Publisher использует persistent delivery и RabbitMQ Publisher 
 
 - Worker не выполняет DDL, миграции или заполнение справочников.
 - В фактической ekk.SourceObject нет столбца Namespace; применяется существующий уникальный ключ без Namespace. Добавление Namespace требует отдельной согласованной миграции.
-- EntityType, SourceSystem и SourceSystemInstance должны быть заполнены согласованными данными до запуска. Приложение не генерирует коды типов и тестовые записи.
-- Владелец Entity определяется по Entity.CreatedBySourceSystemInstanceKey. EntityTypeOwner и SourceSystemInstancePermission в текущей БД отсутствуют и не используются.
+- `EntityTypeOwner` связывает каждый EntityType с одной системой-владельцем (PK по EntityTypeKey). Экземпляр может выполнить RegisterEntity только для типов своей системы.
+- При запуске Worker проверяет соответствие `Ekk:SourceSystemInstanceKey`, `Ekk:SystemCode` и `Ekk:InstanceCode` активным записям `SourceSystem` и `SourceSystemInstance`.
+- `RegisterSourceObject` по-прежнему разрешён только экземпляру, который создал Entity.
+- Скрипт `sql/EntityTypeOwnership_And_TestInstances.sql` создаёт `EntityTypeOwner` и идемпотентно добавляет системы PDM/ERP/MES и создаёт тестовые экземпляры только после задания согласованных кодов в переменных `@PdmTestInstanceCode` и `@ErpTestInstanceCode`. Он не заполняет EntityType и назначения владельцев: для этого необходим утверждённый перечень кодов EntityType.
 - Перед запуском требуется проверить ограничения БД и RabbitMQ topology.
 - Outbox Publisher рассчитан на один экземпляр на одну БД; для нескольких экземпляров нужен согласованный механизм захвата строк Outbox.
 
