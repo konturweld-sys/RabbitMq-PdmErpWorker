@@ -87,10 +87,10 @@ public sealed class RabbitMqRequestWorker : BackgroundService
                     p.GetProperty("Result").GetString() ?? "", p.GetProperty("IdempotencyKey").GetGuid(),
                     OptionalString(p, "ErrorCode"), OptionalString(p, "ErrorMessage"), correlationId), ct);
             case "RegisterEntity":
-                return Convert(await _registration.RegisterEntityAsync(new RegisterEntityRequest(
+                return ToOperationResponse(await _registration.RegisterEntityAsync(new RegisterEntityRequest(
                     p.GetProperty("EntityTypeCode").GetString() ?? "", p.GetProperty("IdempotencyKey").GetGuid(), correlationId), ct));
             case "RegisterSourceObject":
-                return Convert(await _registration.RegisterSourceObjectAsync(new RegisterSourceObjectRequest(
+                return ToOperationResponse(await _registration.RegisterSourceObjectAsync(new RegisterSourceObjectRequest(
                     p.GetProperty("EntityId").GetGuid(), p.GetProperty("ExternalObjectType").GetString() ?? "",
                     p.GetProperty("ExternalObjectId").GetString() ?? "", OptionalString(p, "ExternalObjectCode"),
                     OptionalString(p, "ExternalObjectName"), p.GetProperty("IdempotencyKey").GetGuid(), correlationId), ct));
@@ -126,7 +126,7 @@ public sealed class RabbitMqRequestWorker : BackgroundService
         finally { channel.BasicReturn -= onReturn; }
     }
     private static string? OptionalString(JsonElement p, string n) => p.TryGetProperty(n, out var v) && v.ValueKind != JsonValueKind.Null ? v.GetString() : null;
-    private static OperationResponse Convert(RegistrationResult r) => new(r.Success, r.ResponseCode,
+    private static OperationResponse ToOperationResponse(RegistrationResult r) => new(r.Success, r.ResponseCode,
         r.EntityId is Guid id ? new CompletionPayload(id, r.RegistrationStatus ?? "", DateTime.UtcNow) : null, r.Error);
     private static OperationResponse Failure(string code, string message) => new(false, code, null, new OperationError(code, message, false, false));
     private void ValidateConfiguration()
@@ -148,7 +148,7 @@ public sealed class RabbitMqRequestWorker : BackgroundService
         command.Parameters.Add("@Key", SqlDbType.BigInt).Value = _ekk.SourceSystemInstanceKey;
         command.Parameters.Add("@InstanceCode", SqlDbType.NVarChar, 128).Value = _ekk.InstanceCode;
         command.Parameters.Add("@SystemCode", SqlDbType.NVarChar, 128).Value = _ekk.SystemCode;
-        var count = Convert.ToInt64(await command.ExecuteScalarAsync(ct));
+        var count = System.Convert.ToInt64(await command.ExecuteScalarAsync(ct));
         if (count != 1)
             throw new InvalidOperationException("Configured EKK source system instance is missing, inactive, or does not match SystemCode/InstanceCode.");
         _logger.LogInformation("EKK source instance validated: {SystemCode}/{InstanceCode}, key={InstanceKey}", _ekk.SystemCode, _ekk.InstanceCode, _ekk.SourceSystemInstanceKey);
