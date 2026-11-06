@@ -45,7 +45,7 @@ jobs:
       - name: Upload compiled EKK package
         uses: actions/upload-artifact@v4
         with:
-          name: EKK-win-x64-\${{ github.sha }}
+          name: EKK-win-x64-${{ github.sha }}
           path: .\artifacts\package\**
           if-no-files-found: error
           retention-days: 30
