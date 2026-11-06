@@ -22,21 +22,43 @@ public sealed class EntityRegistrationService
 
     public Task<RegistrationResult> RegisterEntityAsync(RegisterEntityRequest request, CancellationToken ct) =>
         ExecuteIdempotentAsync("RegisterEntity", request.IdempotencyKey, request.CorrelationId,
-            Hash("RegisterEntity", request.EntityTypeCode), async (c, t) =>
+            Hash("RegisterEntity", request.EntityTypeCode), async (c, t, sourceSystemKey) =>
             {
                 if (string.IsNullOrWhiteSpace(request.EntityTypeCode) || request.EntityTypeCode.Length > 128)
                     return Failure("INVALID_PAYLOAD", "EntityTypeCode обязателен (не более 128 символов).");
-                const string typeSql = "SELECT EntityTypeKey FROM ekk.EntityType WITH (UPDLOCK,HOLDLOCK) WHERE Code=@Code AND IsActive=1;";
+
+                const string typeSql = @"
+SELECT et.EntityTypeKey, owner.SourceSystemKey
+FROM ekk.EntityType AS et WITH (UPDLOCK, HOLDLOCK)
+LEFT JOIN ekk.EntityTypeOwner AS owner WITH (UPDLOCK, HOLDLOCK)
+    ON owner.EntityTypeKey = et.EntityTypeKey
+WHERE et.Code = @Code
+  AND et.IsActive = 1;";
                 await using var typeCmd = new SqlCommand(typeSql, c, t) { CommandTimeout = _sql.CommandTimeoutSeconds };
                 typeCmd.Parameters.Add("@Code", SqlDbType.NVarChar, 128).Value = request.EntityTypeCode;
-                var typeValue = await typeCmd.ExecuteScalarAsync(ct);
-                if (typeValue is null || typeValue == DBNull.Value)
-                    return Failure("ENTITY_TYPE_NOT_FOUND", "Активный EntityType с указанным Code не найден.");
+
+                long entityTypeKey;
+                long ownerSourceSystemKey;
+                await using (var typeReader = await typeCmd.ExecuteReaderAsync(ct))
+                {
+                    if (!await typeReader.ReadAsync(ct))
+                        return Failure("ENTITY_TYPE_NOT_FOUND", "Активный EntityType с указанным Code не найден.");
+
+                    entityTypeKey = typeReader.GetInt64(0);
+                    if (typeReader.IsDBNull(1))
+                        return Failure("ENTITY_TYPE_OWNER_NOT_CONFIGURED", "Для EntityType не настроен владеющий SourceSystem.");
+
+                    ownerSourceSystemKey = typeReader.GetInt64(1);
+                }
+
+                if (ownerSourceSystemKey != sourceSystemKey)
+                    return Failure("FORBIDDEN_ENTITY_TYPE_OWNER", "Инициирующая система не является владельцем указанного EntityType.");
+
                 var entityId = Guid.CreateVersion7();
                 const string insertSql = "INSERT INTO ekk.Entity (EntityId,EntityTypeKey,CreatedBySourceSystemInstanceKey,RegistrationStatus) OUTPUT INSERTED.EntityKey VALUES (@EntityId,@EntityTypeKey,@SourceSystemInstanceKey,'RegistrationPending');";
                 await using var insert = new SqlCommand(insertSql, c, t) { CommandTimeout = _sql.CommandTimeoutSeconds };
                 insert.Parameters.Add("@EntityId", SqlDbType.UniqueIdentifier).Value = entityId;
-                insert.Parameters.Add("@EntityTypeKey", SqlDbType.BigInt).Value = Convert.ToInt64(typeValue);
+                insert.Parameters.Add("@EntityTypeKey", SqlDbType.BigInt).Value = entityTypeKey;
                 insert.Parameters.Add("@SourceSystemInstanceKey", SqlDbType.BigInt).Value = _ekk.SourceSystemInstanceKey;
                 var entityKey = Convert.ToInt64(await insert.ExecuteScalarAsync(ct));
                 await InsertOutboxAsync(c, t, entityKey, entityId, "EntityCreated", "entity.created",
@@ -49,7 +71,7 @@ public sealed class EntityRegistrationService
         ExecuteIdempotentAsync("RegisterSourceObject", request.IdempotencyKey, request.CorrelationId,
             Hash("RegisterSourceObject", request.EntityId, request.ExternalObjectType, request.ExternalObjectId,
                 request.ExternalObjectCode ?? "", request.ExternalObjectName ?? ""),
-            async (c, t) =>
+            async (c, t, _) =>
             {
                 if (request.EntityId == Guid.Empty || string.IsNullOrWhiteSpace(request.ExternalObjectType) ||
                     request.ExternalObjectType.Length > 256 || string.IsNullOrWhiteSpace(request.ExternalObjectId) ||
@@ -102,7 +124,7 @@ public sealed class EntityRegistrationService
             }, ct);
 
     private async Task<RegistrationResult> ExecuteIdempotentAsync(string operation, Guid key, Guid? correlationId,
-        byte[] requestHash, Func<SqlConnection, SqlTransaction, Task<RegistrationResult>> action, CancellationToken ct)
+        byte[] requestHash, Func<SqlConnection, SqlTransaction, long, Task<RegistrationResult>> action, CancellationToken ct)
     {
         if (key == Guid.Empty || key.ToString("N")[12] != '7')
             return Failure("INVALID_IDEMPOTENCY_KEY", "IdempotencyKey должен быть UUIDv7.");
@@ -126,7 +148,32 @@ public sealed class EntityRegistrationService
                     return Failure("IDEMPOTENCY_KEY_REUSE", "IdempotencyKey уже использован с другим содержимым.");
                 return replay ?? Failure("IDEMPOTENCY_RESPONSE_INVALID", "Сохранённый ответ идемпотентности повреждён.");
             }
-            var response = await action(connection, transaction);
+            const string sourceInstanceSql = @"
+SELECT ss.SourceSystemKey
+FROM ekk.SourceSystemInstance AS ssi WITH (UPDLOCK, HOLDLOCK)
+INNER JOIN ekk.SourceSystem AS ss WITH (HOLDLOCK)
+    ON ss.SourceSystemKey = ssi.SourceSystemKey
+WHERE ssi.SourceSystemInstanceKey = @InstanceKey
+  AND ssi.Code = @InstanceCode
+  AND ssi.IsActive = 1
+  AND ss.Code = @SystemCode
+  AND ss.IsActive = 1;";
+            await using var sourceInstanceCmd = new SqlCommand(sourceInstanceSql, connection, transaction)
+            {
+                CommandTimeout = _sql.CommandTimeoutSeconds
+            };
+            sourceInstanceCmd.Parameters.Add("@InstanceKey", SqlDbType.BigInt).Value = _ekk.SourceSystemInstanceKey;
+            sourceInstanceCmd.Parameters.Add("@InstanceCode", SqlDbType.NVarChar, 128).Value = _ekk.InstanceCode;
+            sourceInstanceCmd.Parameters.Add("@SystemCode", SqlDbType.NVarChar, 128).Value = _ekk.SystemCode;
+            var sourceSystemValue = await sourceInstanceCmd.ExecuteScalarAsync(ct);
+            if (sourceSystemValue is null || sourceSystemValue == DBNull.Value)
+            {
+                await transaction.RollbackAsync(ct);
+                return Failure("SOURCE_SYSTEM_INSTANCE_CONFIGURATION_INVALID",
+                    "SourceSystemInstanceKey, InstanceCode и SystemCode не соответствуют активному экземпляру в ЕКК.");
+            }
+
+            var response = await action(connection, transaction, Convert.ToInt64(sourceSystemValue));
             const string saveSql = "INSERT INTO ekk.RequestIdempotency (SourceSystemInstanceKey,IdempotencyKey,OperationCode,RequestHash,ResponseCode,ResponsePayload,EntityId,CorrelationId,CompletedAt) VALUES (@InstanceKey,@IdempotencyKey,@OperationCode,@RequestHash,@ResponseCode,@ResponsePayload,@EntityId,@CorrelationId,SYSUTCDATETIME());";
             await using var save = new SqlCommand(saveSql, connection, transaction) { CommandTimeout = _sql.CommandTimeoutSeconds };
             save.Parameters.Add("@InstanceKey", SqlDbType.BigInt).Value = _ekk.SourceSystemInstanceKey;
