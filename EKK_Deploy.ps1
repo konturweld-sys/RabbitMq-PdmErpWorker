@@ -18,6 +18,82 @@ function ConvertFrom-SecureStringToPlainText {
     }
 }
 
+
+function Show-EkkInputDialog {
+    param(
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [string]$DefaultValue = "",
+        [switch]$Password
+    )
+
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = $Title
+    $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $form.Size = New-Object System.Drawing.Size(540, 175)
+    $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $form.MaximizeBox = $false
+    $form.MinimizeBox = $false
+    $form.ShowInTaskbar = $true
+    $form.TopMost = $true
+
+    $label = New-Object System.Windows.Forms.Label
+    $label.Location = New-Object System.Drawing.Point(15, 15)
+    $label.Size = New-Object System.Drawing.Size(495, 22)
+    $label.Text = $Prompt
+    $form.Controls.Add($label)
+
+    $textBox = New-Object System.Windows.Forms.TextBox
+    $textBox.Location = New-Object System.Drawing.Point(15, 42)
+    $textBox.Size = New-Object System.Drawing.Size(495, 25)
+    $textBox.Text = $DefaultValue
+    if ($Password) {
+        $textBox.UseSystemPasswordChar = $true
+    }
+    $form.Controls.Add($textBox)
+
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Location = New-Object System.Drawing.Point(330, 82)
+    $okButton.Size = New-Object System.Drawing.Size(85, 28)
+    $okButton.Text = "ОК"
+    $okButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $form.Controls.Add($okButton)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Location = New-Object System.Drawing.Point(425, 82)
+    $cancelButton.Size = New-Object System.Drawing.Size(85, 28)
+    $cancelButton.Text = "Отмена"
+    $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $form.Controls.Add($cancelButton)
+
+    $form.AcceptButton = $okButton
+    $form.CancelButton = $cancelButton
+    $form.Add_Shown({ $textBox.Select() })
+
+    try {
+        $dialogResult = $form.ShowDialog()
+        if ($dialogResult -ne [System.Windows.Forms.DialogResult]::OK) {
+            throw "Ввод отменён пользователем: $Title."
+        }
+
+        $value = $textBox.Text
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            throw "Поле не может быть пустым: $Prompt"
+        }
+
+        return $value
+    }
+    finally {
+        if ($Password) {
+            $textBox.Clear()
+        }
+        $form.Dispose()
+    }
+}
+
 function Test-EkkSqlSchema {
     param(
         [Parameter(Mandatory = $true)][string]$ConnectionString,
@@ -204,11 +280,20 @@ Write-Host "Default SQL Server: 192.168.50.173, database EKK."
 Write-Host ("RabbitMQ endpoint from appsettings.json: {0}:{1}." -f $rabbitHost, $rabbitPort)
 Write-Host ""
 
-$sqlSecure = Read-Host "SQL Server connection string (hidden input)" -AsSecureString
-if ($sqlSecure.Length -eq 0) {
-    throw "SQL Server connection string is required."
-}
-$sqlConnectionString = ConvertFrom-SecureStringToPlainText -Value $sqlSecure
+$sqlServer = Show-EkkInputDialog -Title "ЕKK — SQL Server" -Prompt "Имя или адрес сервера MS SQL:" -DefaultValue "192.168.50.173"
+$sqlUser = Show-EkkInputDialog -Title "ЕKK — SQL user" -Prompt "Имя пользователя SQL Server:"
+$sqlPassword = Show-EkkInputDialog -Title "ЕKK — SQL password" -Prompt "Пароль пользователя SQL Server:" -Password
+
+$sqlBuilder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
+$sqlBuilder.DataSource = $sqlServer.Trim()
+$sqlBuilder.InitialCatalog = "EKK"
+$sqlBuilder.UserID = $sqlUser
+$sqlBuilder.Password = $sqlPassword
+$sqlBuilder.IntegratedSecurity = $false
+$sqlBuilder.TrustServerCertificate = $true
+$sqlConnectionString = $sqlBuilder.ConnectionString
+
+$sqlPassword = $null
 
 $rabbitUser = Read-Host "RabbitMQ user"
 if ([string]::IsNullOrWhiteSpace($rabbitUser)) {
