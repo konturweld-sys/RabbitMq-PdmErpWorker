@@ -7,7 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 function ConvertFrom-SecureStringToPlainText {
-    param([Parameter(Mandatory = $true)][Security.SecureString]$Value)
+    param([Parameter(Mandatory = $true)][System.Security.SecureString]$Value)
 
     $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
     try {
