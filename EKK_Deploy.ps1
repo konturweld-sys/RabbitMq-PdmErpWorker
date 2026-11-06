@@ -284,13 +284,13 @@ $sqlServer = Show-EkkInputDialog -Title "ЕKK — SQL Server" -Prompt "Имя и
 $sqlUser = Show-EkkInputDialog -Title "ЕKK — SQL user" -Prompt "Имя пользователя SQL Server:"
 $sqlPassword = Show-EkkInputDialog -Title "ЕKK — SQL password" -Prompt "Пароль пользователя SQL Server:" -Password
 
-$sqlBuilder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
-$sqlBuilder.DataSource = $sqlServer.Trim()
-$sqlBuilder.InitialCatalog = "EKK"
-$sqlBuilder.UserID = $sqlUser
-$sqlBuilder.Password = $sqlPassword
-$sqlBuilder.IntegratedSecurity = $false
-$sqlBuilder.TrustServerCertificate = $true
+$sqlBuilder = [System.Data.SqlClient.SqlConnectionStringBuilder]::new()
+$sqlBuilder["Data Source"] = $sqlServer.Trim()
+$sqlBuilder["Initial Catalog"] = "EKK"
+$sqlBuilder["User ID"] = $sqlUser
+$sqlBuilder["Password"] = $sqlPassword
+$sqlBuilder["Integrated Security"] = $false
+$sqlBuilder["TrustServerCertificate"] = $true
 $sqlConnectionString = $sqlBuilder.ConnectionString
 
 $sqlPassword = $null
