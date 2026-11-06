@@ -26,7 +26,7 @@ function Test-EkkSqlSchema {
         [Parameter(Mandatory = $true)][string]$InstanceCode
     )
 
-    $connection = New-Object System.Data.SqlClient.SqlConnection($ConnectionString)
+    $connection = [System.Data.SqlClient.SqlConnection]::new($ConnectionString)
     try {
         $connection.Open()
 
