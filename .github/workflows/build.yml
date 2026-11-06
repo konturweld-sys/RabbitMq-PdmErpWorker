@@ -26,6 +26,17 @@ jobs:
       - name: Build Release
         run: dotnet build .\EKK.sln --configuration Release --no-restore
 
+      - name: Validate PowerShell deployment script
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path .\EKK_Deploy.ps1), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.ToString() }
+            exit 1
+          }
+
       - name: Publish self-contained Windows x64 package
         run: >
           dotnet publish .\src\Ekk.Host\Ekk.Host.csproj
