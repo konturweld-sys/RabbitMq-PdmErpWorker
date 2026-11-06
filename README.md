@@ -50,7 +50,7 @@ Worker не выполняет DDL, миграции или заполнение
 
 В фактической ekk.SourceObject нет столбца Namespace; применяется существующий уникальный ключ без Namespace. Добавление Namespace требует отдельной согласованной миграции.
 
-EntityType, SourceSystem и SourceSystemInstance должны быть заполнены согласованными данными до запуска. Приложение не генерирует коды типов и тестовые записи. Владелец Entity определяется по Entity.CreatedBySourceSystemInstanceKey. EntityTypeOwner и SourceSystemInstancePermission в текущей БД отсутствуют и не используются.
+EntityType, EntityTypeOwner, SourceSystem и SourceSystemInstance должны быть заполнены согласованными данными до запуска. Приложение не генерирует коды типов и тестовые записи. При RegisterEntity Worker проверяет активность SourceSystemInstance и SourceSystem, соответствие SourceSystemInstanceKey/InstanceCode/SystemCode и владельца EntityType по ekk.EntityTypeOwner. При RegisterSourceObject право владельца проверяется по Entity.CreatedBySourceSystemInstanceKey. Таблица SourceSystemInstancePermission не используется.
 
 Outbox Publisher рассчитан на один экземпляр на одну БД; для нескольких экземпляров нужен согласованный механизм захвата строк Outbox.
 
